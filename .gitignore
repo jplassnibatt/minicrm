@@ -1,0 +1,13 @@
+/minicrm
+/dist/
+/MiniCRM.app/
+/minicrm-build
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Go
+vendor/
