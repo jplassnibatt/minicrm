@@ -57,9 +57,22 @@ const FILTERS = [
 ];
 const PAGE = 50;
 
+// What Salesforce and sf reported for the last MTM comments save or refresh, per account.
+function mtmStatusHtml(a) {
+  const s = state.mtmStatus;
+  return s && s.id === a.id ? `<pre class="sf-status${s.status === 'failed' ? ' bad' : ''}" id="mtm-status">${esc(s.lines.join('\n'))}</pre>` : '';
+}
+function showMtmStatus(a) {
+  if (!a || !a.mtmSync) return;
+  const m = a.mtmSync;
+  state.mtmStatus = { id: a.id, status: m.status, lines: m.lines && m.lines.length ? m.lines : [m.message] };
+  const wrap = $('#mtm-status-wrap');
+  if (wrap && state.openId === a.id) wrap.innerHTML = mtmStatusHtml(a);
+}
+
 const state = {
   view: 'buckets', bucketId: null, bookStatus: 'active', q: '', filters: {},
-  sort: null, order: null, offset: 0, notes: [], meta: null, summary: null, openId: null, tableSeq: 0,
+  sort: null, order: null, offset: 0, notes: [], meta: null, summary: null, openId: null, tableSeq: 0, mtmStatus: null,
   selected: new Set(), pageIds: new Set(),
 };
 
@@ -300,7 +313,7 @@ async function renderNotes() {
   $('#content').innerHTML = `<div class="panel feed">${rows}</div>`;
 }
 
-const FIELD_LABELS = { apiKey: 'API key', bucket: 'Bucket', risk: 'Risk flag', cadence: 'Cadence', notes: 'Notes', details: 'Details', renewalManager: 'Renewal manager', renewalManagerLink: 'Renewal manager link', contract: 'Contract update', arr: 'ARR', termEnd: 'Term end', autorenew: 'AutoRenew', accountOwner: 'Account Owner', accountLink: 'Account link', accountOwnerLink: 'Account Owner link', slackChannel: 'Slack channel', renewalStatus: 'Renewal status', ews: 'EWS', import: 'Import', asOfDate: 'Day-count date', created: 'Created', deleted: 'Deleted', name: 'Name', lastEmail: 'Last email', lastGong: 'Last Gong' };
+const FIELD_LABELS = { apiKey: 'API key', bucket: 'Bucket', risk: 'Risk flag', cadence: 'Cadence', notes: 'Notes', details: 'Details', mtmComments: 'MTM comments', mtmSync: 'Salesforce sync', renewalManager: 'Renewal manager', renewalManagerLink: 'Renewal manager link', contract: 'Contract update', arr: 'ARR', termEnd: 'Term end', autorenew: 'AutoRenew', accountOwner: 'Account Owner', accountLink: 'Account link', accountOwnerLink: 'Account Owner link', slackChannel: 'Slack channel', renewalStatus: 'Renewal status', ews: 'EWS', import: 'Import', asOfDate: 'Day-count date', created: 'Created', deleted: 'Deleted', name: 'Name', lastEmail: 'Last email', lastGong: 'Last Gong' };
 async function renderActivity() {
   const data = await api('/activity?limit=200');
   if (!data.total) { $('#content').innerHTML = '<div class="panel"><div class="empty">Nothing has changed yet.</div></div>'; return; }
@@ -547,6 +560,13 @@ function drawerHtml(a) {
           <textarea data-field="details" placeholder="Standing information about this account… Links: https://… or [text](https://…)">${esc(a.details)}</textarea></label>`
     : `<div class="field"><span>Details</span><div class="note-text">${a.details ? mdLinks(a.details) : '<span class="muted">None yet. Click Edit to add.</span>'}</div></div>`}
       </div>
+      ${a.termType === 'Evergreen' || a.mtmComments ? `<div>
+        <label class="field"><span>MTM comments</span>
+          <textarea data-field="mtmComments" placeholder="Why an ARR adjustment is expected on this month-to-month account, for which subdomain, with links to renewal opportunities.">${esc(a.mtmComments)}</textarea>
+          <small class="muted">Start each new entry on its own line with the date, for example 11/24/26. When you leave the box it saves, and a new entry added at the top or at the end is added to Salesforce at the same end.</small></label>
+        <div class="mtm-tools"><button type="button" class="link-btn" id="mtm-refresh">Refresh from Salesforce</button></div>
+        <div id="mtm-status-wrap">${mtmStatusHtml(a)}</div>
+      </div>` : ''}
       <div>
         <h3 class="section-title">Notes</h3>
         <div class="field">
@@ -557,9 +577,9 @@ function drawerHtml(a) {
       </div>
       <div id="sync-info">
         ${(() => {
-          const cu = a.claudeUpdatedAt;
+          const cu = a.aiUpdatedAt;
           const mu = a.manualUpdatedAt;
-          const claudeOlder = cu && mu && new Date(cu) < new Date(mu);
+          const aiOlder = cu && mu && new Date(cu) < new Date(mu);
           const manualOlder = mu && cu && new Date(mu) < new Date(cu);
           let comparison = '';
           if (cu && mu) {
@@ -568,7 +588,7 @@ function drawerHtml(a) {
             comparison = `${ahead} ahead of ${behind} by ${fmtDiff(cu, mu)}`;
           }
           return `
-          <div class="field"><span>Last synced by AI</span><span style="${claudeOlder ? 'color: var(--red)' : ''}">${cu ? fmtDateTime(cu) : '<span class="muted">never</span>'}</span></div>
+          <div class="field"><span>Last synced by AI</span><span style="${aiOlder ? 'color: var(--red)' : ''}">${cu ? fmtDateTime(cu) : '<span class="muted">never</span>'}</span></div>
           ${mu ? `<div class="field"><span>Last manual renewal-field change</span><span style="${manualOlder ? 'color: var(--red)' : ''}">${fmtDateTime(mu)}</span></div>` : ''}
           ${comparison ? `<div class="field comparison">${comparison}</div>` : ''}
           `;
@@ -652,6 +672,16 @@ $('#drawer').addEventListener('click', e => {
   if (bdel) {
     if (!window.confirm(`Delete the bucket "${bdel.dataset.name}"? Its accounts move to the next bucket they match. This cannot be undone.`)) return;
     return api('/buckets/' + bdel.dataset.id, { method: 'DELETE' }).then(() => afterBucketsChange('Bucket deleted. Accounts re-sorted.')).catch(fail);
+  }
+  if (e.target.closest('#mtm-refresh')) {
+    if (!window.confirm('Replace the MTM comments here with the current text from Salesforce? Text that is not in Salesforce yet is replaced too; the old text stays in the Activity log.')) return;
+    const btn = $('#mtm-refresh');
+    btn.disabled = true; btn.textContent = 'Refreshing…';
+    return save(async id => {
+      const a = await api(`/accounts/${id}/mtm-refresh`, { method: 'POST' });
+      showMtmStatus(a);
+      return a;
+    }, 'MTM comments refreshed from Salesforce', true).then(a => { if (!a) { btn.disabled = false; btn.textContent = 'Refresh from Salesforce'; } });
   }
   if (e.target.closest('#details-toggle')) {
     state.editing = !state.editing;
@@ -776,7 +806,7 @@ $('#drawer').addEventListener('change', e => {
       const m = t.value.trim().match(/^\[(.+)\]\((https?:\/\/\S+)\)$/i);
       body = m ? { [t.dataset.field]: m[1], [linkField]: m[2] } : { ...body, [linkField]: null };
     }
-    save(patch(body), `${label} saved`);
+    save(patch(body), `${label} saved`).then(a => { if (a && a.mtmSync) { showMtmStatus(a); toast(a.mtmSync.message, a.mtmSync.status === 'failed'); } });
   } else if (t.id === 'f-cadence') save(patch({ cadence: t.value || null }), 'Cadence saved');
   else if (t.id === 'f-outcome') {
     $('#renew-fields').hidden = t.value !== 'Renewed';

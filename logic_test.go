@@ -1,9 +1,11 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -290,7 +292,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 	r, err := src.createAccount(body(`{"name": "Acme", "arr": 5000, "termEnd": "2030-01-31", "autorenew": false,
 		"accountLink": "https://sf.example/1", "slackChannel": "[#acme](https://slack.example/C1)", "ews": 41,
-		"risk": "Yes", "cadence": "Weekly", "details": "line one\nline two", "notes": ["newest", "oldest"]}`), "")
+		"risk": "Yes", "cadence": "Weekly", "details": "line one\nline two", "mtmComments": "02/07/25 first\n11/24/26 second", "notes": ["newest", "oldest"]}`), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,4 +317,73 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if got, _ := dump(dst); got != want {
 		t.Errorf("round trip differs:\n got %s\nwant %s", got, want)
 	}
+}
+
+// A database made before the rename has claude_updated_at; opening it must keep the stored times.
+func TestAIUpdatedAtMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(strings.ReplaceAll(schema, "ai_updated_at", "claude_updated_at")); err != nil {
+		t.Fatal(err)
+	}
+	const stamp = "2026-11-01T10:00:00.000Z"
+	if _, err := old.Exec("INSERT INTO accounts(name, created_at, updated_at, claude_updated_at) VALUES('Acme','t','t',?)", stamp); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	for i := 0; i < 2; i++ { // the second open must find the column already renamed
+		db, err := openDB(path)
+		if err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		r, err := getRow(db, "1")
+		if err != nil || r.AiUpdatedAt == nil || *r.AiUpdatedAt != stamp {
+			t.Errorf("open %d: ai_updated_at %v, %v", i, r.AiUpdatedAt, err)
+		}
+		if _, err := db.Exec("SELECT claude_updated_at FROM accounts"); err == nil {
+			t.Errorf("open %d: the old column is still there", i)
+		}
+		db.Close()
+	}
+}
+
+// The source header: "ai" marks a write as the AI's (and "claude-code", still sent by older scripts).
+func TestSourceHeaderAI(t *testing.T) {
+	useDefaultBuckets()
+	db, err := openDB(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	a := &App{db: db}
+	for i, c := range []struct {
+		source string
+		wantAI bool
+	}{{"ai", true}, {"claude-code", true}, {"", false}, {"other", false}} {
+		body := `{"name": "Acct` + string(rune('A'+i)) + `", "arr": 100}`
+		r, err := a.createAccount(mustJSON(t, body), c.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, _ := json.Marshal(present(r, "2026-11-24"))
+		if got := strings.Contains(string(out), `"aiUpdatedAt"`); got != c.wantAI {
+			t.Errorf("source %q: aiUpdatedAt in response = %v, want %v (%s)", c.source, got, c.wantAI, out)
+		}
+		if strings.Contains(string(out), "claudeUpdatedAt") {
+			t.Errorf("source %q: old field name still in the response", c.source)
+		}
+	}
+}
+
+func mustJSON(t *testing.T, s string) any {
+	t.Helper()
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		t.Fatal(err)
+	}
+	return v
 }

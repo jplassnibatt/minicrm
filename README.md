@@ -114,6 +114,8 @@ That `[text](address)` form is how you write a link: the text people see goes in
 
 Use Notes for "what happened today" and Details for "what is always true about this account".
 
+- **MTM comments:** shown on month-to-month accounts (no term end), and on any account that already has some. One free-text box for why an ARR adjustment is expected, for which subdomain, with links to renewal opportunities. Start each new entry on its own line with the date. It saves when you leave the box and is included in Export data. If the Salesforce CLI (`sf`) is installed and logged in, a new entry you add at the top or at the end is also added to the Salesforce Account Summary's MTM Comments (see [Sending MTM comments to Salesforce](#sending-mtm-comments-to-salesforce)).
+
 ### Notes
 
 Write a note and click **Add note**. Each note is saved with its date and time, and you can keep as many as you like. **Delete** removes one. Notes never overwrite each other.
@@ -126,10 +128,10 @@ MiniCRM records two timestamps on every account:
 
 | Field | Meaning |
 | --- | --- |
-| **claudeUpdatedAt** | When AI last synced this account (API calls with header `X-MiniCRM-Source: claude-code`) |
+| **aiUpdatedAt** | When AI last synced this account (API calls with header `X-MiniCRM-Source: ai`; the older value `claude-code` still works) |
 | **manualUpdatedAt** | When renewal fields (ARR, term end, AutoRenew, renewal status, contract outcome) were last changed by anyone other than AI — including manual edits in this UI section |
 
-They show in the account drawer under **Sync info**. If `manualUpdatedAt` is newer than `claudeUpdatedAt`, a renewal field was changed manually after AI's last sync — check the **Activity** page for exactly what changed.
+They show in the account drawer under **Sync info**. If `manualUpdatedAt` is newer than `aiUpdatedAt`, a renewal field was changed manually after AI's last sync — check the **Activity** page for exactly what changed.
 
 A comparison line shows who is ahead — for example "AI ahead of human by 3 days" or "Human ahead of AI by 2 weeks" — and the older timestamp is shown in red.
 
@@ -149,10 +151,10 @@ When **Renewed** is chosen, the **Last change on** date is recorded so you can s
 #### Via the API (curl)
 
 ```bash
-# AI sync: stamps claudeUpdatedAt
+# AI sync: stamps aiUpdatedAt
 curl -X PUT http://127.0.0.1:4300/api/accounts/1 \
   -H "Content-Type: application/json" \
-  -H "X-MiniCRM-Source: claude-code" \
+  -H "X-MiniCRM-Source: ai" \
   -d '{"arr": 7000, "termEnd": "2031-01-31", "autorenew": true}'
 
 # Manual change to a renewal field: stamps manualUpdatedAt
@@ -160,7 +162,7 @@ curl -X PUT http://127.0.0.1:4300/api/accounts/1 \
   -H "Content-Type: application/json" \
   -d '{"arr": 7500}'
 
-# Record a contract outcome: stamps manualUpdatedAt (unless X-MiniCRM-Source: claude-code is sent)
+# Record a contract outcome: stamps manualUpdatedAt (unless X-MiniCRM-Source: ai is sent)
 curl -X PUT http://127.0.0.1:4300/api/accounts/1/contract \
   -H "Content-Type: application/json" \
   -d '{"outcome": "Renewed", "newArr": 7000, "newTermEnd": "2031-01-31", "newAutorenew": true}'
@@ -191,6 +193,19 @@ Two more buckets are always there and can't be deleted:
 - **Future Watch:** every account with a term end date that fits none of your buckets.
 
 **To add or change a bucket,** open the **Buckets** page and click **Add bucket**, or open a bucket and click **Edit bucket**. Give it a name, a colour and its limits. Leave a limit empty to mean "no limit". The position decides which bucket is checked first.
+
+## Sending MTM comments to Salesforce
+
+When you add a new entry to an account's MTM comments, at the top (newest first) or at the end (oldest first), MiniCRM adds it to the same account's **MTM Comments** in Salesforce (Account Summary record) with the `sf` command, at the same end. It reads the value Salesforce holds right now and adds to it, so anything others added there is kept.
+
+- **Set up once:** install the [Salesforce CLI](https://developer.salesforce.com/tools/salesforcecli), log in with `sf org login web`, and make that org the default with `sf config set target-org <username or alias>`. To use another org, start MiniCRM with `MINICRM_SF_ORG=<username or alias>`. If `sf` is somewhere unusual, set `MINICRM_SF_BIN` to its path.
+- **Needs:** the account's Salesforce link (the `.../lightning/r/<Account Id>/view` address) and exactly one Micro Account Summary record in Salesforce for it.
+- **If it fails** (not logged in, offline, no record), your text is still saved here, a message says why, and the entry is sent with your next edit.
+- **If you change earlier text** instead of adding a new entry, Salesforce is left unchanged; update it there by hand. Later new entries sync again.
+- **What you see:** under the MTM comments box a small panel shows what Salesforce reported for your last save, for example `Successfully updated record: aH24W000000PLQtSAO.`, where the entry was added and `Salesforce replied: HTTP/1.1 204`, or why nothing was sent.
+- **Refresh from Salesforce:** the button under the box replaces the MTM comments here with what Salesforce holds now. It asks first, because text that is not in Salesforce yet is replaced too; the old text stays in the Activity log. It never writes to Salesforce.
+- **Turn it off:** start MiniCRM with `MINICRM_SF_SYNC=off` (this also disables the Refresh button).
+- Imports and writes from the AI assistant do not send anything to Salesforce.
 
 ## Back up, move or share your data
 

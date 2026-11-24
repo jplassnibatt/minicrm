@@ -101,11 +101,13 @@ type row struct {
 	TermEnd                *string
 	Autorenew              *bool
 	AccountOwner           string
-	AccountLink            string // Salesforce URL
-	AccountOwnerLink       string // Slack URL
-	SlackChannel           string // free text; the UI renders [name](https://…) as a link
-	RenewalManagerLink     string // Slack URL
-	Details                string // one free-text box, overwritten on edit (unlike Notes)
+	AccountLink            string  // Salesforce URL
+	AccountOwnerLink       string  // Slack URL
+	SlackChannel           string  // free text; the UI renders [name](https://…) as a link
+	RenewalManagerLink     string  // Slack URL
+	Details                string  // one free-text box, overwritten on edit (unlike Notes)
+	MtmSyncedText          *string // MtmComments as last sent to Salesforce (nil before the first edit)
+	MtmComments            string  // month-to-month comments, one free-text box like Details (Salesforce: Account Summary > MTM Comments)
 	RenewalStatus          string
 	Ews                    string
 	RenewalManager         string
@@ -124,7 +126,7 @@ type row struct {
 	ContractUpdatedAt      *string
 	CreatedAt              string
 	UpdatedAt              string
-	ClaudeUpdatedAt        *string
+	AiUpdatedAt            *string
 	ManualUpdatedAt        *string
 }
 
@@ -146,43 +148,45 @@ type sourceInfo struct {
 
 // Account is the API representation of an account.
 type Account struct {
-	ID                 int64        `json:"id"`
-	Name               string       `json:"name"`
-	Arr                float64      `json:"arr"`
-	TermEnd            *string      `json:"termEnd"`
-	Days               *int         `json:"days"`
-	Autorenew          *bool        `json:"autorenew"`
-	BucketID           int64        `json:"bucketId"`
-	BucketName         string       `json:"bucketName"`
-	TermType           string       `json:"termType"`
-	FiscalQuarter      *string      `json:"fiscalQuarter"`
-	AccountOwner       string       `json:"accountOwner"`
-	AccountLink        string       `json:"accountLink"`
-	AccountOwnerLink   string       `json:"accountOwnerLink"`
-	SlackChannel       string       `json:"slackChannel"`
-	RenewalStatus      string       `json:"renewalStatus"`
-	Ews                *float64     `json:"ews"` // null when not set
-	RenewalManager     string       `json:"renewalManager"`
-	RenewalManagerLink string       `json:"renewalManagerLink"`
-	LastEmail          *string      `json:"lastEmail"`
-	LastEmailDaysAgo   *int         `json:"lastEmailDaysAgo"`
-	LastGong           *string      `json:"lastGong"`
-	LastGongDaysAgo    *int         `json:"lastGongDaysAgo"`
-	Status             string       `json:"status"`
-	InactiveReason     *string      `json:"inactiveReason"`
-	InactiveSince      *string      `json:"inactiveSince"`
-	Risk               *string      `json:"risk"`
-	Cadence            *string      `json:"cadence"`
-	Details            string       `json:"details"`
-	Notes              []noteItem   `json:"notes"` // every note, newest first
-	NotesUpdatedAt     *string      `json:"notesUpdatedAt"`
-	NoteCount          int          `json:"noteCount"`
-	Contract           contractInfo `json:"contract"`
-	Source             sourceInfo   `json:"source"`
-	CreatedAt          string       `json:"createdAt"`
-	UpdatedAt          string       `json:"updatedAt"`
-	ClaudeUpdatedAt    *string      `json:"claudeUpdatedAt,omitempty"`
-	ManualUpdatedAt    *string      `json:"manualUpdatedAt,omitempty"`
+	ID                 int64          `json:"id"`
+	Name               string         `json:"name"`
+	Arr                float64        `json:"arr"`
+	TermEnd            *string        `json:"termEnd"`
+	Days               *int           `json:"days"`
+	Autorenew          *bool          `json:"autorenew"`
+	BucketID           int64          `json:"bucketId"`
+	BucketName         string         `json:"bucketName"`
+	TermType           string         `json:"termType"`
+	FiscalQuarter      *string        `json:"fiscalQuarter"`
+	AccountOwner       string         `json:"accountOwner"`
+	AccountLink        string         `json:"accountLink"`
+	AccountOwnerLink   string         `json:"accountOwnerLink"`
+	SlackChannel       string         `json:"slackChannel"`
+	RenewalStatus      string         `json:"renewalStatus"`
+	Ews                *float64       `json:"ews"` // null when not set
+	RenewalManager     string         `json:"renewalManager"`
+	RenewalManagerLink string         `json:"renewalManagerLink"`
+	LastEmail          *string        `json:"lastEmail"`
+	LastEmailDaysAgo   *int           `json:"lastEmailDaysAgo"`
+	LastGong           *string        `json:"lastGong"`
+	LastGongDaysAgo    *int           `json:"lastGongDaysAgo"`
+	Status             string         `json:"status"`
+	InactiveReason     *string        `json:"inactiveReason"`
+	InactiveSince      *string        `json:"inactiveSince"`
+	Risk               *string        `json:"risk"`
+	Cadence            *string        `json:"cadence"`
+	Details            string         `json:"details"`
+	MtmComments        string         `json:"mtmComments"`
+	MtmSync            *mtmSyncResult `json:"mtmSync,omitempty"` // only on a PATCH that changed MtmComments
+	Notes              []noteItem     `json:"notes"`             // every note, newest first
+	NotesUpdatedAt     *string        `json:"notesUpdatedAt"`
+	NoteCount          int            `json:"noteCount"`
+	Contract           contractInfo   `json:"contract"`
+	Source             sourceInfo     `json:"source"`
+	CreatedAt          string         `json:"createdAt"`
+	UpdatedAt          string         `json:"updatedAt"`
+	AiUpdatedAt        *string        `json:"aiUpdatedAt,omitempty"`
+	ManualUpdatedAt    *string        `json:"manualUpdatedAt,omitempty"`
 }
 
 func strPtr(s string) *string { return &s }
@@ -242,11 +246,11 @@ func present(r row, asOf string) Account {
 		AccountOwner: r.AccountOwner, RenewalStatus: renewalStatus, RenewalManager: r.RenewalManager,
 		LastEmail: r.LastEmail, LastGong: r.LastGong,
 		Status: status, InactiveReason: inactiveReason, InactiveSince: inactiveSince,
-		Risk: r.Risk, Cadence: r.Cadence, Details: r.Details, Notes: r.Notes, NoteCount: len(r.Notes),
+		Risk: r.Risk, Cadence: r.Cadence, Details: r.Details, MtmComments: r.MtmComments, Notes: r.Notes, NoteCount: len(r.Notes),
 		Contract:  contractInfo{r.ContractOutcome, r.ContractNewArr, r.ContractNewTermEnd, r.ContractNewAutorenew, r.ContractUpdatedAt},
 		Source:    sourceInfo{r.Arr, r.TermEnd, r.Autorenew, r.RenewalStatus, r.RenewalManager},
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
-		ClaudeUpdatedAt: r.ClaudeUpdatedAt, ManualUpdatedAt: r.ManualUpdatedAt,
+		AiUpdatedAt: r.AiUpdatedAt, ManualUpdatedAt: r.ManualUpdatedAt,
 	}
 	if len(a.Notes) == 0 {
 		a.Notes = []noteItem{} // JSON [] rather than null

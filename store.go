@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   account_owner_link TEXT NOT NULL DEFAULT '',
   slack_channel TEXT NOT NULL DEFAULT '',
   details TEXT NOT NULL DEFAULT '',
+  mtm_comments TEXT NOT NULL DEFAULT '',
+  mtm_synced_text TEXT,
   renewal_manager_link TEXT NOT NULL DEFAULT '',
   renewal_status TEXT NOT NULL DEFAULT '',
   ews TEXT NOT NULL DEFAULT '',
@@ -44,7 +46,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   contract_updated_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  claude_updated_at TEXT,
+  ai_updated_at TEXT,
   manual_updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS activity (
@@ -90,8 +92,8 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 const accountCols = `id, name, arr, term_end, autorenew, account_owner, renewal_status, ews, renewal_manager,
   last_email, last_gong, source_active, dropped_at, risk, cadence,
   renewal_manager_override, contract_outcome, contract_new_arr, contract_new_term_end,
-  contract_new_autorenew, contract_updated_at, created_at, updated_at, claude_updated_at, manual_updated_at,
-  account_link, account_owner_link, slack_channel, details, renewal_manager_link`
+  contract_new_autorenew, contract_updated_at, created_at, updated_at, ai_updated_at, manual_updated_at,
+  account_link, account_owner_link, slack_channel, details, renewal_manager_link, mtm_comments, mtm_synced_text`
 
 // querier is satisfied by both *sql.DB and *sql.Tx.
 type querier interface {
@@ -114,7 +116,7 @@ func openDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("creating schema: %w", err)
 	}
 	// Columns added after the first release: add them to databases created before that.
-	for _, c := range []string{"account_link", "account_owner_link", "slack_channel", "details", "renewal_manager_link"} {
+	for _, c := range []string{"account_link", "account_owner_link", "slack_channel", "details", "renewal_manager_link", "mtm_comments"} {
 		if _, err := db.Exec("ALTER TABLE accounts ADD COLUMN " + c + " TEXT NOT NULL DEFAULT ''"); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
 			return nil, fmt.Errorf("adding column %s: %w", c, err)
@@ -127,12 +129,23 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("merging slack channel links: %w", err)
 	}
+	// The column used to be called claude_updated_at. Renaming keeps the stored times; a database
+	// that never had it (or was already renamed) answers "no such column".
+	if _, err := db.Exec("ALTER TABLE accounts RENAME COLUMN claude_updated_at TO ai_updated_at"); err != nil && !strings.Contains(err.Error(), "no such column") {
+		db.Close()
+		return nil, fmt.Errorf("renaming column claude_updated_at: %w", err)
+	}
 	// Columns added after the first release: add them to databases created before that.
-	for _, c := range []string{"claude_updated_at", "manual_updated_at"} {
+	for _, c := range []string{"ai_updated_at", "manual_updated_at"} {
 		if _, err := db.Exec("ALTER TABLE accounts ADD COLUMN " + c + " TEXT"); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
 			return nil, fmt.Errorf("adding column %s: %w", c, err)
 		}
+	}
+	// The MTM comments as last sent to Salesforce; NULL until the first edit (see sfsync.go).
+	if _, err := db.Exec("ALTER TABLE accounts ADD COLUMN mtm_synced_text TEXT"); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		db.Close()
+		return nil, fmt.Errorf("adding column mtm_synced_text: %w", err)
 	}
 	if err := seedSystemBuckets(db); err != nil {
 		db.Close()
@@ -150,8 +163,8 @@ func scanRow(s scanner) (row, error) {
 		&r.Cadence, &r.RenewalManagerOverride, &r.ContractOutcome,
 		&r.ContractNewArr, &r.ContractNewTermEnd, &r.ContractNewAutorenew, &r.ContractUpdatedAt,
 		&r.CreatedAt, &r.UpdatedAt,
-		&r.ClaudeUpdatedAt, &r.ManualUpdatedAt,
-		&r.AccountLink, &r.AccountOwnerLink, &r.SlackChannel, &r.Details, &r.RenewalManagerLink)
+		&r.AiUpdatedAt, &r.ManualUpdatedAt,
+		&r.AccountLink, &r.AccountOwnerLink, &r.SlackChannel, &r.Details, &r.RenewalManagerLink, &r.MtmComments, &r.MtmSyncedText)
 	return r, err
 }
 

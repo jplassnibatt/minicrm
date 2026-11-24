@@ -235,6 +235,8 @@ var fields = map[string]fieldDef{
 	"cadence":   {"cadence", vOneOf(cadenceOptions)},
 	"notes":     {"notes", vNotes},
 	"details":   {"details", vText(20000)},
+	// Same limit as the Salesforce field (32,768) so a later sync cannot truncate it.
+	"mtmComments": {"mtm_comments", vText(32768)},
 	"renewalManager": {"renewal_manager_override", func(v any, k string) (any, error) {
 		s, err := vText(200)(v, k)
 		if err != nil || s == "" {
@@ -248,7 +250,9 @@ var (
 	// sourceHeader is the header AI sends on its API writes so MiniCRM can
 	// distinguish an AI sync from a human change.
 	sourceHeader = "X-MiniCRM-Source"
-	sourceClaude = "claude-code"
+	sourceAI     = "ai"
+	// sourceLegacyAI is the value earlier scripts send; still accepted so they keep working.
+	sourceLegacyAI = "claude-code"
 
 	// renewalFields are API field names whose change by a non-AI source counts as
 	// a manual renewal-field change.
@@ -264,6 +268,9 @@ var (
 		return out
 	}()
 )
+
+// isAISource reports whether a request says it comes from the AI assistant.
+func isAISource(source string) bool { return source == sourceAI || source == sourceLegacyAI }
 
 var reNameLink = regexp.MustCompile(`^\[(.+)\]\((https?://\S+)\)$`)
 
@@ -369,6 +376,8 @@ func (r row) col(c string) any {
 		return r.RenewalManagerLink
 	case "details":
 		return r.Details
+	case "mtm_comments":
+		return r.MtmComments
 	case "renewal_status":
 		return r.RenewalStatus
 	case "ews":
@@ -440,11 +449,11 @@ func (a *App) createAccount(body any, source string) (row, error) {
 			return &httpError{409, fmt.Sprintf("Account %q already exists", name.value)}
 		}
 		ts := nowISO()
-		claude := source == sourceClaude
+		ai := isAISource(source)
 		cols := []string{"created_at", "updated_at"}
 		vals := []any{ts, ts}
-		if claude {
-			cols = append(cols, "claude_updated_at")
+		if ai {
+			cols = append(cols, "ai_updated_at")
 			vals = append(vals, ts)
 		} else if hasRenewalFields(f) {
 			cols = append(cols, "manual_updated_at")
@@ -513,19 +522,24 @@ func (a *App) updateAccount(id string, body any, source string) (row, error) {
 			}
 		}
 		ts := nowISO()
-		claude := source == sourceClaude
+		ai := isAISource(source)
 		var sets []string
 		var vals []any
 		for _, c := range changes {
 			sets = append(sets, c.col+" = ?")
 			vals = append(vals, c.value)
 		}
-		if claude {
-			sets = append(sets, "claude_updated_at = ?")
+		if ai {
+			sets = append(sets, "ai_updated_at = ?")
 			vals = append(vals, ts)
 		} else if hasRenewalFields(changes) {
 			sets = append(sets, "manual_updated_at = ?")
 			vals = append(vals, ts)
+		}
+		// First edit of the MTM comments: what was there before is what Salesforce already has.
+		if findField(changes, "mtmComments") != nil && cur.MtmSyncedText == nil {
+			sets = append(sets, "mtm_synced_text = ?")
+			vals = append(vals, cur.MtmComments)
 		}
 		vals = append(vals, ts, cur.ID)
 		if _, err := tx.Exec("UPDATE accounts SET "+strings.Join(sets, ", ")+", updated_at = ? WHERE id = ?", vals...); err != nil {
@@ -610,10 +624,10 @@ func (a *App) setContract(id string, body any, source string) (row, error) {
 		if outcome != nil {
 			updatedAt = ts
 		}
-		claude := source == sourceClaude
-		if claude {
+		ai := isAISource(source)
+		if ai {
 			if _, err := tx.Exec(`UPDATE accounts SET contract_outcome = ?, contract_new_arr = ?, contract_new_term_end = ?,
-				contract_new_autorenew = ?, contract_updated_at = ?, updated_at = ?, claude_updated_at = ? WHERE id = ?`,
+				contract_new_autorenew = ?, contract_updated_at = ?, updated_at = ?, ai_updated_at = ? WHERE id = ?`,
 				outcome, newArr, newTermEnd, newAutorenew, updatedAt, ts, ts, cur.ID); err != nil {
 				return err
 			}
@@ -766,8 +780,8 @@ func (a *App) importAccounts(body any, source string) (importResult, error) {
 					sets = append(sets, fv.col+" = ?")
 					vals = append(vals, fv.value)
 				}
-				if source == sourceClaude {
-					sets = append(sets, "claude_updated_at = ?")
+				if isAISource(source) {
+					sets = append(sets, "ai_updated_at = ?")
 					vals = append(vals, ts)
 				} else if hasRenewalFields(f) {
 					sets = append(sets, "manual_updated_at = ?")
@@ -781,8 +795,8 @@ func (a *App) importAccounts(body any, source string) (importResult, error) {
 			} else {
 				cols := []string{"created_at", "updated_at"}
 				vals := []any{ts, ts}
-				if source == sourceClaude {
-					cols = append(cols, "claude_updated_at")
+				if isAISource(source) {
+					cols = append(cols, "ai_updated_at")
 					vals = append(vals, ts)
 				} else if hasRenewalFields(f) {
 					cols = append(cols, "manual_updated_at")
@@ -881,7 +895,7 @@ func (a *App) exportData() (map[string]any, error) {
 			"slackChannel": r.SlackChannel, "renewalStatus": r.RenewalStatus, "ews": p.Ews,
 			"renewalManager": p.RenewalManager, "renewalManagerLink": r.RenewalManagerLink,
 			"lastEmail": r.LastEmail, "lastGong": r.LastGong, "risk": r.Risk, "cadence": r.Cadence,
-			"details": r.Details, "notes": notes, "contract": p.Contract,
+			"details": r.Details, "mtmComments": r.MtmComments, "notes": notes, "contract": p.Contract,
 		})
 	}
 	buckets := []bucket{}
@@ -1260,12 +1274,13 @@ var endpoints = [][3]string{
 	{"GET", "/api/accounts", "List accounts — filter, sort, paginate"},
 	{"POST", "/api/accounts", "Create an account; \"name\" is required and may be \"[Name](https://…)\" to set accountLink too"},
 	{"GET", "/api/accounts/:id", "Get one account, including all of its notes"},
-	{"PATCH", "/api/accounts/:id", "Update account fields (risk, cadence, details, names and their links, slackChannel, arr, termEnd, ews as a number, …); \"notes\" adds a note"},
+	{"PATCH", "/api/accounts/:id", "Update account fields (risk, cadence, details, mtmComments, names and their links, slackChannel, arr, termEnd, ews as a number, …); \"notes\" adds a note"},
 	{"DELETE", "/api/accounts/:id", "Delete an account"},
 	{"PUT", "/api/accounts/:id/contract", "Record a contract outcome: Renewed / Churned / New CSM / null to clear"},
 	{"GET", "/api/accounts/:id/activity", "Change history for one account"},
 	{"GET", "/api/accounts/:id/notes", "Notes on one account, newest first"},
 	{"POST", "/api/accounts/:id/notes", "Add a timestamped note: { \"text\": \"...\" }"},
+	{"POST", "/api/accounts/:id/mtm-refresh", "Replace the account's MTM comments with the current Salesforce MTM Comments (sf CLI)"},
 	{"DELETE", "/api/accounts/:id/notes/:noteId", "Delete one note"},
 	{"GET", "/api/notes", "Every note across all accounts, newest first"},
 	{"GET", "/api/activity", "Change history across all accounts"},
@@ -1469,7 +1484,18 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) (int, any, error) {
 			if err != nil {
 				return 0, nil, err
 			}
-			return 200, present(row, asOf), nil
+			acct := present(row, asOf)
+			if obj, ok := body.(map[string]any); ok {
+				if _, touched := obj["mtmComments"]; touched {
+					if isAISource(r.Header.Get(sourceHeader)) {
+						// A sync from Salesforce (the skill), not an entry typed here: nothing to send back.
+						a.setMTMSynced(row.ID, row.MtmComments)
+					} else {
+						acct.MtmSync = a.syncMTM(row)
+					}
+				}
+			}
+			return 200, acct, nil
 		case id != "" && sub == "" && m == "DELETE":
 			err := inTx(a.db, func(tx *sql.Tx) error {
 				row, err := getRow(tx, id)
@@ -1485,6 +1511,14 @@ func (a *App) route(w http.ResponseWriter, r *http.Request) (int, any, error) {
 				return logActivity(tx, row.ID, row.Name, "deleted", row.Name, nil)
 			})
 			return 204, nil, err
+		case sub == "mtm-refresh" && m == "POST":
+			row, res, err := a.refreshMTM(id)
+			if err != nil {
+				return 0, nil, err
+			}
+			acct := present(row, asOf)
+			acct.MtmSync = res
+			return 200, acct, nil
 		case sub == "contract" && m == "PUT":
 			body, err := readBody(w, r)
 			if err != nil {

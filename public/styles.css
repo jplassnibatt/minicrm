@@ -288,6 +288,9 @@ a.ext { color: var(--accent-text); text-decoration: underline; text-underline-of
 .banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 14px 16px; margin-bottom: 12px; border-color: var(--accent); background: var(--accent-soft); }
 .banner-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .field textarea.short { min-height: 64px; }
+.mtm-tools { margin-top: 2px; }
+.sf-status { margin-top: 6px; padding: 8px 10px; font-size: 12px; white-space: pre-wrap; }
+.sf-status.bad { border-color: var(--red); color: var(--red); }
 .field input[type="color"] { width: 64px; height: 36px; padding: 3px; cursor: pointer; }
 .link-btn.danger { color: var(--red); }
 .key-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
